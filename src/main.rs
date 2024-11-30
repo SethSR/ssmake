@@ -3,6 +3,8 @@ use std::path::{Path,PathBuf};
 
 use duct::cmd;
 
+use toml::{Table, Value};
+
 /// Path to tool-chain installation directory
 const YAUL_INSTALL_ROOT: &'static str = "/home/seth/.local/x-tools/sh2eb-elf";
 
@@ -21,12 +23,6 @@ const YAUL_PROG_SH_PREFIX: &'static str = YAUL_ARCH_SH_PREFIX;
 /// Name of build directory
 //const YAUL_BUILD: &'static str = "build";
 
-/// Compilation verbosity
-/// Values:
-///   true  -> Display build step line only
-///   false -> Verbose
-static mut SILENT: bool = true;
-
 /// Enable DEBUG on a release build
 /// Values:
 ///   true  -> Enable DEBUG
@@ -41,10 +37,6 @@ fn main() -> std::io::Result<()> {
 	assert_eq!(1, YAUL_ARCH_SH_PREFIX.trim().split(' ').count(), "YAUL_ARCH_SH_PREFIX (tool-chain prefix) contains spaces");
 
 	assert_eq!(1, YAUL_PROG_SH_PREFIX.trim().split(' ').count(), "YAUL_PROG_SH_PREFIX (tool-chain program prefix) contains spaces");
-
-	fn word_split(s: &str, n: usize) -> Option<&str> {
-		s.split(';').nth(n)
-	}
 
 	let yaul_cflags_shared = format!("-I{YAUL_INSTALL_ROOT}/{YAUL_ARCH_SH_PREFIX}/include/yaul");
 
@@ -66,54 +58,146 @@ fn main() -> std::io::Result<()> {
 		panic!("expected command: 'build' or 'clean'");
 	}
 
-	// Customizable
-	let sh_program = args.next().expect("no program name");
-	let mut sh_defsyms: Vec<String> = vec![];
-	let mut sh_srcs = args.map(PathBuf::from).collect::<Vec<PathBuf>>();
-	let sh_build_dir = "build";
-	let sh_output_dir = ".";
+	// TODO - srenshaw - Add better error handling for missing configuration files.
+	let config = std::fs::read_to_string("config.toml")
+		.expect("missing 'config.toml'")
+		.parse::<Table>()
+		.unwrap_or_default();
 
-	println!("building {sh_program}");
-	println!("  defined symbols [{}]", sh_defsyms.join(","));
-	println!("  sources [{}]", sh_srcs.iter()
+	fn missing_config_string<S: AsRef<str>>(property: &str, value: S) -> S {
+		eprintln!("missing {property} = \"value\" (string)");
+		value
+	}
+
+	fn missing_config_str_array<T>(property: &str) -> Vec<T> {
+		eprintln!("missing {property} = [] (string array)");
+		vec![]
+	}
+
+	fn missing_config_path<'a>(property: &str, value: &'a str) -> &'a str {
+		eprintln!("missing {property} = \"path\" (string)]");
+		value
+	}
+
+	fn missing_config_integer(property: &str, value: u32) -> u32 {
+		eprintln!("missing {property} = \"value\" (u32)");
+		value
+	}
+
+	// Project Directory Configuration
+	let dir_image  = PathBuf::from(config["dirs"]["image"].as_str()  // ISO/CUE
+		.unwrap_or_else(|| missing_config_path("dirs.image", "cd")));
+	let dir_audio  = PathBuf::from(config["dirs"]["audio"].as_str()  // ISO/CUE
+		.unwrap_or_else(|| missing_config_path("dirs.audio", "audio")));
+	let dir_build  = PathBuf::from(config["dirs"]["build"].as_str()  // ISO/CUE
+		.unwrap_or_else(|| missing_config_path("dirs.build", "build")));
+	let dir_asset  = PathBuf::from(config["dirs"]["assets"].as_str() // ISO/CUE
+		.unwrap_or_else(|| missing_config_path("dirs.assets", "assets")));
+	let dir_output = PathBuf::from(config["dirs"]["output"].as_str() // ISO/CUE
+		.unwrap_or_else(|| missing_config_path("dirs.output", ".")));
+
+	// TODO - srenshaw - Do we need this to be configurable?
+	let image_1st_read_bin    = "A.BIN"; // ISO/CUE
+
+	println!("project config");
+	println!("  image  = '{}'", dir_asset.display());
+	println!("  build  = '{}'", dir_build.display());
+	println!("  asset  = '{}'", dir_asset.display());
+	println!("  build  = '{}'", dir_build.display());
+	println!("  output = '{}'", dir_output.display());
+	println!();
+
+	// SH2 Program Configuration
+	let sh_program = config["sh"]["program"].as_str()
+		.expect("missing sh.program = \"name\" (string)");
+	let sh_flags: Vec<String> = config["sh"]["flags"].as_array()
+		.cloned()
+		.unwrap_or_else(|| missing_config_str_array("sh.flags"))
+		.into_iter()
+		.flat_map(|v| v.as_str().map(str::to_owned))
+		.collect();
+	let mut sh_symbols: Vec<String> = config["sh"].get("symbols")
+		.map(|v| v.as_array())
+		.flatten()
+		.cloned()
+		.unwrap_or_else(|| missing_config_str_array("sh.symbols"))
+		.into_iter()
+		.flat_map(|v| v.as_str().map(str::to_owned))
+		.collect();
+	let mut sh_srcs: Vec<PathBuf> = config["sh"]["srcs"].as_array()
+		.expect("missing sh.srcs = [] (string array)")
+		.into_iter()
+		.flat_map(Value::as_str)
+		.map(PathBuf::from)
+		.collect();
+
+	println!("SH2 program config");
+	println!("  program = '{sh_program}'");
+	println!("  flags   = [{}]", sh_flags.join(","));
+	println!("  symbols = [{}]", sh_symbols.join(","));
+	println!("  sources = [{}]", sh_srcs.iter()
 		.map(|s| s.display().to_string())
 		.collect::<Vec<String>>()
 		.join(","));
 	println!();
 
-	// Customizable variables
-	let image_directory        = "cd";           // ISO/CUE
-	let audio_tracks_directory = "audio-tracks"; // ISO/CUE
-	let image_1st_read_bin     = "A.BIN";        // ISO/CUE
-	let ip_version             = "V1.000";       // ISO/CUE, SS
-	let ip_release_date        = "20241030";     // ISO/CUE, SS
-	let ip_areas               = "JTUBKAEL";     // ISO/CUE, SS
-	let ip_peripherals         = "JAMKST";       // ISO/CUE, SS
-	let ip_title               = "Test";         // ISO/CUE, SS
-	let ip_main_stack_addr     = "0x06004000";   // ISO/CUE, SS
-	let ip_service_stack_addr  = "0x06001E00";   // ISO/CUE, SS
-	let ip_1st_read_addr       = "0x06004000";   // ISO/CUE, SS
-	let ip_1st_read_size       = "0";            // ISO/CUE, SS
+	// IP Configuration
+	let ip_version         = config["ip"]["version"].as_str()             // ISO/CUE, SS
+		.unwrap_or_else(|| missing_config_string("ip.version", "V1.000"));
+	let ip_release_date    = config["ip"]["release-date"].as_str()        // ISO/CUE, SS
+		.map(str::to_owned)
+		.unwrap_or_else(|| {
+			let date = chrono::Utc::now().format("%Y%m%d").to_string();
+			missing_config_string("ip.release-date", date)
+		});
+	let ip_areas           = config["ip"]["areas"].as_str()               // ISO/CUE, SS
+		.unwrap_or_else(|| missing_config_string("ip.areas", "JTUBKAEL"));
+	let ip_peripherals     = config["ip"]["peripherals"].as_str()         // ISO/CUE, SS
+		.unwrap_or_else(|| missing_config_string("ip.peripherals", "JAMKST"));
+	let ip_title           = config["ip"]["title"].as_str()               // ISO/CUE, SS
+		.unwrap_or_else(|| missing_config_string("ip.title", sh_program));
+	let ip_main_stack_addr = config["ip"]["main-stack-addr"].as_integer() // ISO/CUE, SS
+		.map(|v| v as u32)
+		.unwrap_or_else(|| missing_config_integer("ip.main-stack-addr", 0x06004000));
+	let ip_sub_stack_addr  = config["ip"]["sub-stack-addr"].as_integer()  // ISO/CUE, SS
+		.map(|v| v as u32)
+		.unwrap_or_else(|| missing_config_integer("ip.sub-stack-addr", 0x06001E00));
+	let ip_1st_read_addr   = config["ip"]["1st-read-addr"].as_integer()   // ISO/CUE, SS
+		.map(|v| v as u32)
+		.unwrap_or_else(|| missing_config_integer("ip.1st-read-addr", 0x06004000));
+	let ip_1st_read_size   = config["ip"]["1st-read-size"].as_integer()   // ISO/CUE, SS
+		.map(|v| v as u32)
+		.unwrap_or_else(|| missing_config_integer("ip.1st-read-size", 0));
 
-	println!("iso directory='{image_directory}'");
-	println!("audio tracks directory='{audio_tracks_directory}'");
-	println!("iso 1st read binary ='{image_1st_read_bin}'");
-	println!("ip version='{ip_version}'");
-	println!("ip release date='{ip_release_date}'");
-	println!("ip areas='{ip_areas}'");
-	println!("ip peripherals='{ip_peripherals}'");
-	println!("ip title='{ip_title}'");
-	println!("ip main stack address='{ip_main_stack_addr}'");
-	println!("ip sub stack address='{ip_service_stack_addr}'");
-	println!("ip 1st read address='{ip_1st_read_addr}'");
-	println!("ip 1st read size='{ip_1st_read_size}'");
+	println!("IP config");
+	println!("  version            = '{ip_version}'");
+	println!("  release-date       = '{ip_release_date}'");
+	println!("  areas              = '{ip_areas}'");
+	println!("  peripherals        = '{ip_peripherals}'");
+	println!("  title              = '{ip_title}'");
+	println!("  main-stack-address = '{ip_main_stack_addr}'");
+	println!("  sub-stack-address  = '{ip_sub_stack_addr}'");
+	println!("  1st-read-address   = '{ip_1st_read_addr}'");
+	println!("  1st-read-size      = '{ip_1st_read_size}'");
 	println!();
 
-	let sh_build_path = std::path::absolute(sh_build_dir)
-		.expect(&format!("unable to find path to '{sh_build_dir}'"));
+	sh_symbols.extend([
+		format!("-Wl,--defsym=___master_stack=0x{ip_main_stack_addr:x}"),
+		format!("-Wl,--defsym=___slave_stack=0x{ip_sub_stack_addr:x}"),
+	]);
 
-	let sh_output_path = std::path::absolute(sh_output_dir)
-		.expect(&format!("unable to find path to '{sh_output_dir}'"));
+	let assets: Vec<(String, String)> = config["assets"].as_array()
+		.cloned()
+		.unwrap_or_default()
+		.into_iter()
+		.flat_map(|v| v["file"].as_str().map(str::to_owned).zip(v["name"].as_str().map(str::to_owned)))
+		.collect();
+
+	let sh_build_path = std::path::absolute(&dir_build)
+		.expect(&format!("unable to find path to '{}'", dir_build.display()));
+
+	let sh_output_path = std::path::absolute(&dir_output)
+		.expect(&format!("unable to find path to '{}'", dir_output.display()));
 
 	fn convert_build_path<P: AsRef<Path> + Copy>(build_path: P, s: P) -> Result<PathBuf, String> {
 		let s = std::path::absolute(s)
@@ -181,62 +265,31 @@ fn main() -> std::io::Result<()> {
 		.chain(std::iter::once(yaul_cxxflags))
 		.collect();
 
-	let builtin_assets = vec![];
+	std::fs::create_dir_all(dir_build)?;
+	std::fs::create_dir_all(dir_output)?;
 
-	assert!(!ip_version.is_empty(), "Undefined IP_VERSION");
-	assert!(!ip_release_date.is_empty(), "Undefined IP_RELEASE_DATE");
-	assert!(!ip_areas.is_empty(), "Undefined IP_AREAS");
-	assert!(!ip_peripherals.is_empty(), "Undefined IP_PERIPHERALS");
-	assert!(!ip_title.is_empty(), "Undefined IP_TITLE");
-	assert!(!ip_main_stack_addr.is_empty(), "Undefined IP_MAIN_STACK_ADDR");
-	assert!(!ip_service_stack_addr.is_empty(), "Undefined IP_SERVICE_STACK_ADDR");
-	assert!(!ip_1st_read_addr.is_empty(), "Undefined IP_1ST_READ_ADDR");
-	assert!(!ip_1st_read_size.is_empty(), "Undefined IP_1ST_READ_SIZE");
+	println!("builtin assets");
+	for (file, name) in assets {
+		println!("  {}/{file} -> {name}", dir_asset.display());
 
-	sh_defsyms.extend_from_slice(&[
-		format!("-Wl,--defsym=___master_stack={ip_main_stack_addr}"),
-		format!("-Wl,--defsym=___slave_stack={ip_service_stack_addr}"),
-	]);
-
-	assert!(!sh_build_dir.is_empty(), "Empty SH_BUILD_DIR (SH build directory)");
-	assert!(!sh_output_dir.is_empty(), "Empty SH_OUTPUT_DIR (SH output directory)");
-	assert!(!sh_program.is_empty(), "Empty SH_PROGRAM (SH program name)");
-
-	std::fs::create_dir_all(sh_build_dir)?;
-	std::fs::create_dir_all(sh_output_dir)?;
-
-	let mut builtin_asset_rule = |asset_file: &str, asset_name: &str| -> Result<(), String> {
-		println!("builtin_asset_rule({asset_file},{asset_name})");
-
-		let asset_path = Path::new(asset_file).with_extension("o");
-		let target = convert_build_path(&sh_build_path, &asset_path)?;
+		let asset_path = PathBuf::from(file.clone() + ".o");
+		let target = match convert_build_path(&sh_build_path, &asset_path) {
+			Ok(path) => path,
+			Err(e) => {
+				eprintln!("{e}");
+				continue;
+			}
+		};
 
 		cmd!(format!("{YAUL_INSTALL_ROOT}/bin/bin2o"),
-			asset_file,
-			asset_name,
+			format!("{}/{file}", dir_asset.display()),
+			name,
 			target.display().to_string(),
 		).stderr_capture().run().expect("unable to convert bin to object file");
 
 		sh_srcs.push(asset_path);
-		Ok(())
-	};
-
-	println!("builtin assets");
-	for builtin_asset in builtin_assets {
-		use std::io::{Error, ErrorKind};
-
-		if let Err(e) = builtin_asset_rule(
-			word_split(builtin_asset, 1)
-				.ok_or(Error::new(ErrorKind::Other, "no path to builtin asset"))?,
-			word_split(builtin_asset, 2)
-				.ok_or(Error::new(ErrorKind::Other, "invalid builtin asset name"))?,
-		) {
-			eprintln!("{e}");
-		}
 	}
 
-	// Check that SH_SRCS don't include duplicates. Be mindful that sort remove
-	// duplicates.
 	let sh_srcs_uniq = {
 		let mut temp = sh_srcs.clone();
 		temp.sort_unstable();
@@ -265,11 +318,11 @@ fn main() -> std::io::Result<()> {
 				println!("  {}", path.with_extension("o").display());
 				sh_objs_uniq.push(path.with_extension("o"));
 			}
-			Err(e) => eprintln!("{e}"),
+			Err(e) => eprintln!("  ERROR: {e}"),
 		}
 	}
 
-	sh_ldflags.extend(sh_defsyms);
+	sh_ldflags.extend(sh_symbols);
 
 	let sh_specs = vec!["yaul.specs", "yaul-main.specs"];
 
@@ -291,7 +344,11 @@ fn main() -> std::io::Result<()> {
 		.split('\n')
 		.map(str::to_owned)
 		.collect();
-	println!("SH system include directories [\n{}\n]", sh_system_include_dirs.join("\n"));
+	println!("SH system include directories");
+	for dir in sh_system_include_dirs {
+		println!("  {dir}");
+	}
+	println!();
 
 	fn get_mod_date<P: AsRef<Path>>(a: P) -> std::time::SystemTime {
 		std::fs::metadata(a.as_ref())
@@ -306,8 +363,6 @@ fn main() -> std::io::Result<()> {
 		.map(|spec| format!("-specs={spec}"))
 		.collect();
 
-	println!();
-
 	let wrap_error = format!("{YAUL_INSTALL_ROOT}/share/wrap-error");
 
 	let yaul_ip_sx = format!("{YAUL_INSTALL_ROOT}/share/yaul/ip/ip.sx");
@@ -315,27 +370,45 @@ fn main() -> std::io::Result<()> {
 	let build_ip_bin = format!("{}/IP.BIN", sh_build_path.display());
 	let out_program_iso = format!("{}/{sh_program}.iso", sh_output_path.display());
 
-	println!("generating SH C build objects");
-	for src in sh_srcs_c.iter() {
-		match convert_build_path(&sh_build_path, &src.with_extension("o")) {
-			Err(e) => eprintln!("{e}"),
-			Ok(target) => if get_mod_date(src) > get_mod_date(&target) {
-				println!("  {}", src.with_extension("o").display());
+	let build_c_options = |src: &Path, target: &Path| [
+		"-MT".into(), target.display().to_string(),
+		"-MF".into(), target.with_extension("d").display().to_string(),
+		"-MD".into(),
+	].into_iter()
+		.chain(sh_cflags.clone())
+		.chain(specs.clone())
+		.chain([
+			"-c".into(),
+			"-o".into(),
+			target.display().to_string(),
+			src.display().to_string(),
+		]);
+	let build_cxx_options = |src: &Path, target: &Path| [
+		"-MT".into(), target.display().to_string(),
+		"-MF".into(), target.with_extension("d").display().to_string(),
+		"-MD".into(),
+	].into_iter()
+		.chain(sh_cxxflags.clone())
+		.chain(specs.clone())
+		.chain([
+			"-c".into(),
+			"-o".into(),
+			target.display().to_string(),
+			src.display().to_string(),
+		]);
 
-				cmd(format!("{sh_cc}"), [
-					"-MT".into(), target.display().to_string(),
-					"-MF".into(), target.with_extension("d").display().to_string(),
-					"-MD".into(),
-				].into_iter()
-					.chain(sh_cflags.clone())
-					.chain(specs.clone())
-					.chain([
-						"-c".into(),
-						"-o".into(),
-						target.display().to_string(),
-						src.display().to_string(),
-					])
-				).run().expect(&format!("failed to compile {}", target.display()));
+	println!("generating SH C build objects");
+	println!("    '{}'", build_c_options(Path::new("source.c"), Path::new("target.o")).collect::<Vec<String>>().join(" "));
+	for src in sh_srcs_c.iter() {
+		print!("  {}", src.display());
+		match convert_build_path(&sh_build_path, &src.with_extension("o")) {
+			Err(e) => eprintln!("  ERROR: {e}"),
+			Ok(target) => if get_mod_date(src) > get_mod_date(&target) {
+				println!(" -> {}", src.with_extension("o").display());
+
+				cmd(format!("{sh_cc}"), build_c_options(src, &target))
+					.run()
+					.expect(&format!("failed to compile {}", target.display()));
 			}
 		}
 
@@ -365,27 +438,17 @@ fn main() -> std::io::Result<()> {
 	println!();
 
 	println!("generating SH C++ build objects");
+	println!("    '{}'", build_cxx_options(Path::new("source.c"), Path::new("target.o")).collect::<Vec<String>>().join(" "));
 	for src in sh_srcs_cxx.iter() {
+		print!("  {}", src.display());
 		match convert_build_path(&sh_build_path, &src.with_extension("o")) {
 			Err(e) => eprintln!("{e}"),
 			Ok(target) => if get_mod_date(src) > get_mod_date(&target) {
-				println!("  {}", src.with_extension("o").display());
+				println!(" -> {}", src.with_extension("o").display());
 
-				cmd(format!("{sh_cxx}"), [
-					"-MT".into(), target.display().to_string(),
-					"-MF".into(), target.with_extension("d").display().to_string(),
-					"-MD".into(),
-				].into_iter()
-					.chain(sh_cxxflags.clone())
-					.chain(specs.iter().cloned())
-					.chain(cpp_specs.clone())
-					.chain([
-						"-c".into(),
-						"-o".into(),
-						target.display().to_string(),
-						src.display().to_string(),
-					])
-				).run().expect(&format!("failed to compile {}", target.display()));
+				cmd(format!("{sh_cxx}"), build_cxx_options(src, &target))
+					.run()
+					.expect(&format!("failed to compile {}", target.display()));
 			}
 		}
 
@@ -415,29 +478,43 @@ fn main() -> std::io::Result<()> {
 	}
 	println!();
 
+	let build_asm_options = |src: &Path, target: &Path| sh_cflags.clone()
+		.into_iter()
+		.chain([
+			"-c".into(),
+			"-o".into(),
+			target.display().to_string(),
+			src.display().to_string(),
+		]);
+
 	println!("generating SH asm build objects");
+	println!("    '{}'", build_asm_options(Path::new("source.asm"), Path::new("target.o")).collect::<Vec<String>>().join(" "));
 	for src in sh_srcs_s.iter() {
+		println!("  {}", src.display());
 		match convert_build_path(&sh_build_path, &src.with_extension("o")) {
 			Err(e) => eprintln!("{e}"),
 			Ok(target) => if get_mod_date(src) > get_mod_date(&target) {
-				println!("  {}", src.with_extension("o").display());
+				println!(" -> {}", src.with_extension("o").display());
 
-				cmd(format!("{sh_cc}"),
-					sh_cflags.clone()
-						.into_iter()
-						.chain([
-							"-c".into(),
-							"-o".into(),
-							target.display().to_string(),
-							src.display().to_string(),
-						])
-				).run().expect(&format!("failed to compile {}", target.display()));
+				cmd(format!("{sh_cc}"), build_asm_options(src, &target))
+					.run()
+					.expect(&format!("failed to compile {}", target.display()));
 			}
 		}
 	}
 	println!();
 
 	let build_program_elf = build_program_bin.with_extension("elf");
+
+	let build_elf_options = specs.clone()
+		.into_iter()
+		.chain(cpp_specs.clone())
+		.chain(sh_objs_uniq.iter().map(|obj| format!("{}", obj.display())))
+		.chain(sh_ldflags)
+		.chain([
+			"-o".into(),
+			build_program_elf.display().to_string(),
+		]);
 
 	let newest_obj = sh_objs_uniq.iter()
 		.flat_map(|obj| std::fs::metadata(obj).ok())
@@ -448,18 +525,11 @@ fn main() -> std::io::Result<()> {
 	if let Some(obj) = newest_obj {
 		if obj > get_mod_date(&build_program_elf) {
 			println!("building {}", build_program_elf.display());
+			println!("  '{}'", build_elf_options.clone().collect::<Vec<String>>().join(" "));
 
-			cmd(format!("{sh_ld}"),
-				specs.clone()
-					.into_iter()
-					.chain(cpp_specs.clone())
-					.chain(sh_objs_uniq.iter().map(|obj| format!("{}", obj.display())))
-					.chain(sh_ldflags)
-					.chain([
-						"-o".into(),
-						format!("{}", build_program_elf.display()),
-					])
-			).run().expect("failed to execute link");
+			cmd(format!("{sh_ld}"), build_elf_options)
+				.run()
+				.expect("failed to execute link");
 
 			cmd!(format!("{sh_nm}"), format!("{}", build_program_elf.display()))
 				.stdout_path(build_program_elf.with_extension("sym"))
@@ -485,13 +555,9 @@ fn main() -> std::io::Result<()> {
 			build_program_bin.display().to_string(),
 		).run()?;
 
-		if unsafe { !SILENT } {
-			eprintln!("E");
-
-			cmd!("du", "-hs", build_program_bin.display().to_string())
-				.pipe(cmd!("awk", r#"'{ print $1; }'"#))
-				.run()?;
-		}
+		cmd!("du", "-hs", build_program_bin.display().to_string())
+			.pipe(cmd!("awk", r#"{ print $1; }"#))
+			.run()?;
 	}
 	println!();
 
@@ -508,11 +574,11 @@ fn main() -> std::io::Result<()> {
 			ip_release_date,
 			ip_areas,
 			ip_peripherals,
-			ip_title,
-			ip_main_stack_addr,
-			ip_service_stack_addr,
-			ip_1st_read_addr,
-			ip_1st_read_size,
+			format!("'{ip_title}'"),
+			format!("0x{ip_main_stack_addr:0x}"),
+			format!("0x{ip_sub_stack_addr:0x}"),
+			format!("0x{ip_1st_read_addr:0x}"),
+			format!("0x{ip_1st_read_size:0x}"),
 		).run()?;
 	}
 	println!();
@@ -525,17 +591,17 @@ fn main() -> std::io::Result<()> {
 	{
 		println!("building {sh_program}.iso");
 
-		cmd!("mkdir", "-p", image_directory).run()?;
+		cmd!("mkdir", "-p", dir_image.display().to_string()).run()?;
 
 		cmd!("cp",
 			build_program_bin.display().to_string(),
-			format!("{image_directory}/{image_1st_read_bin}"),
+			format!("{}/{image_1st_read_bin}", dir_image.display()),
 		).run()?;
 
 		for txt in ["ABS.TXT", "BIB.TXT", "CPY.TXT"] {
-			match std::fs::exists(&format!("{image_directory}/{txt}")) {
+			match std::fs::exists(&format!("{}/{txt}", dir_image.display())) {
 				Ok(false) => {
-					cmd!("printf", "--", "empty").stdout_path(format!("{image_directory}/{txt}")).run()?;
+					cmd!("printf", "--", "empty").stdout_path(format!("{}/{txt}", dir_image.display())).run()?;
 				}
 				Ok(true) => {}
 				Err(e) => eprintln!("{e}"),
@@ -543,10 +609,10 @@ fn main() -> std::io::Result<()> {
 		}
 
 		cmd!(&wrap_error, format!("{YAUL_INSTALL_ROOT}/bin/make-iso"),
-			image_directory,
+			dir_image,
 			build_ip_bin,
 			sh_output_path.display().to_string(),
-			sh_program.clone(),
+			sh_program,
 		).run()?;
 
 		is_iso_built = true;
@@ -554,14 +620,16 @@ fn main() -> std::io::Result<()> {
 	println!();
 
 	println!("attempting cue build");
-	let cue_file = [ sh_output_path.clone(), sh_program.clone().into() ].iter().collect::<PathBuf>().with_extension("cue");
+	let cue_file = [ sh_output_path.clone(), sh_program.into() ].iter()
+		.collect::<PathBuf>()
+		.with_extension("cue");
 	if !std::fs::exists(&cue_file)? || is_iso_built {
 		println!("building {}", cue_file.display());
 
-		cmd!("mkdir", "-p", format!("{audio_tracks_directory}")).run()?;
+		cmd!("mkdir", "-p", dir_audio.display().to_string()).run()?;
 
 		cmd!(&wrap_error, format!("{YAUL_INSTALL_ROOT}/bin/make-cue"),
-			audio_tracks_directory,
+			dir_audio.display().to_string(),
 			out_program_iso,
 		).run()?;
 	}
