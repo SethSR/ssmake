@@ -146,11 +146,12 @@ fn main() -> std::io::Result<()> {
 	// IP Configuration
 	let ip_version         = config["ip"]["version"].as_str()             // ISO/CUE, SS
 		.unwrap_or_else(|| missing_config_string("ip.version", "V1.000"));
-	let ip_release_date    = config["ip"]["release-date"].as_str()        // ISO/CUE, SS
-		.map(str::to_owned)
+	let ip_release_date    = config["ip"]["release-date"].as_integer()        // ISO/CUE, SS
+		.map(|v| v as u32)
 		.unwrap_or_else(|| {
-			let date = chrono::Utc::now().format("%Y%m%d").to_string();
-			missing_config_string("ip.release-date", date)
+			let date = chrono::Utc::now().format("%Y%m%d").to_string().parse::<u32>()
+				.expect("unable to convert current date to u32");
+			missing_config_integer("ip.release-date", date)
 		});
 	let ip_areas           = config["ip"]["areas"].as_str()               // ISO/CUE, SS
 		.unwrap_or_else(|| missing_config_string("ip.areas", "JTUBKAEL"));
@@ -413,29 +414,6 @@ fn main() -> std::io::Result<()> {
 					.expect(&format!("failed to compile {}", target.display()));
 			}
 		}
-
-/*
-		println!("compiling {}", src.display());
-		cmd(format!("/usr/bin/gcc"), [
-			format!("{}", src.display()),
-			"-D__INTELLISENSE__".into(),
-			"-m32".into(),
-			"-nostdinc".into(),
-			"-Wno-gnu-statement-expression".into(),
-		].into_iter()
-			.chain(sh_cflags.clone())
-			.chain(sh_system_include_dirs
-				.iter()
-				.map(std::path::absolute)
-				.filter_map(|m| m.ok())
-				.map(|path| format!("-isystem{}", path.display())))
-			.chain([
-				format!("--include={YAUL_INSTALL_ROOT}/{YAUL_PROG_SH_PREFIX}/include/intellisense.h"),
-				"-c".into(),
-				src.display().to_string(),
-			]),
-		).stdout_to_stderr().run().expect(&format!("unable to compile {}", src.display()));
-*/
 	}
 
 	trace!("generating SH C++ build objects");
@@ -451,30 +429,6 @@ fn main() -> std::io::Result<()> {
 					.expect(&format!("failed to compile {}", target.display()));
 			}
 		}
-
-/*
-		println!("compiling {}", src.display());
-		cmd(format!("/usr/bin/g++"), [
-			format!("{}", src.display()),
-			"-D__INTELLISENSE__".into(),
-			"-m32".into(),
-			"-nostdinc++".into(),
-			"-nostdlibinc".into(),
-			"-Wno-gnu-statement-expression".into(),
-		].into_iter()
-			.chain(sh_cxxflags.clone())
-			.chain(sh_system_include_dirs
-				.iter()
-				.map(std::path::absolute)
-				.filter_map(|m| m.ok())
-				.map(|path| format!("-isystem{}", path.display())))
-			.chain([
-				format!("--include={YAUL_INSTALL_ROOT}/{YAUL_PROG_SH_PREFIX}/include/intellisense.h"),
-				"-c".into(),
-				src.display().to_string(),
-			]),
-		).stdout_to_stderr().run().expect(&format!("unable to compile {}", src.display()));
-*/
 	}
 
 	let build_asm_options = |src: &Path, target: &Path| sh_cflags.clone()
@@ -566,7 +520,7 @@ fn main() -> std::io::Result<()> {
 		cmd!(&wrap_error, format!("{YAUL_INSTALL_ROOT}/bin/make-ip"),
 			build_program_bin.display().to_string(),
 			ip_version,
-			ip_release_date,
+			ip_release_date.to_string(),
 			ip_areas,
 			ip_peripherals,
 			format!("'{ip_title}'"),
