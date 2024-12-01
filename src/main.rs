@@ -277,7 +277,7 @@ fn main() -> std::io::Result<()> {
 		let target = match convert_build_path(&sh_build_path, &asset_path) {
 			Ok(path) => path,
 			Err(e) => {
-				debug!("{e}");
+				error!("{e}");
 				continue;
 			}
 		};
